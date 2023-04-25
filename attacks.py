@@ -38,7 +38,58 @@ class PGDAttack:
         performs random initialization and early stopping, depending on the 
         self.rand_init and self.early_stop flags.
         """
-        pass # FILL ME
+        # pick an initial point
+        if self.rand_init:
+            # create [x-eps, x+eps]
+            delta = torch.zeros_like(x).uniform_(-self.eps, self.eps)
+        else:
+            delta = torch.zeros_like(x) - x
+        # loop until stopping condition is met:
+        x.requires_grad_()
+        for i in range(self.n):
+            batch_predictions = self.model(x + delta)
+            loss = self.loss_func(batch_predictions, y)
+            grad = torch.sign(torch.autograd.grad(loss.sum(), x, retain_graph=True)[0])
+            delta = delta + self.alpha * grad
+            # assert [x-eps, x+eps]
+            delta = torch.clamp(delta, -self.eps, self.eps)
+            # projection = min{max{0,x},1}
+            delta = torch.clamp(x + delta, 0, 1) - x
+            if self.early_stop:
+                # stops if all examples are miss classified
+                adversary = x + delta
+                if targeted:
+                    if (batch_predictions.max(1)[1] == y).sum().item() == 0:
+                        return adversary
+                else:
+                    if (batch_predictions.max(1)[1] != y).sum().item() == 0:
+                        return adversary
+        return x + delta
+
+        # # pick an initial point
+        # if self.rand_init:
+        #     # create [x-eps, x+eps]
+        #     delta = x + torch.zeros_like(x).uniform_(-self.eps, self.eps)
+        # else:
+        #     delta = x
+        # # loop until stopping condition is met:
+        # for i in range(self.n):
+        #     delta.requires_grad = True
+        #     self.model.zero_grad()
+        #     batch_predictions = self.model(delta)
+        #     loss = self.loss_func(batch_predictions, y)
+        #     loss.backward()
+        #     x_adv = delta + self.alpha * delta.grad.sign()
+        #     # assert [x-eps, x+eps]
+        #     eta = torch.clamp(x_adv - x, min=-self.eps, max=self.eps)
+        #     # projection = min{max{0,x},1}
+        #     delta = torch.clamp(x + eta, min=0, max=1).detach_()
+        #     if self.early_stop:
+        #         adversary = x + delta
+        #         if torch.all(adversary >= 0) and torch.all(adversary <= 1):
+        #             return adversary
+        # return x + delta
+
 
 
 class NESBBoxPGDAttack:
