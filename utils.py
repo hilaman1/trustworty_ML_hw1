@@ -72,13 +72,14 @@ def run_whitebox_attack(attack, data_loader, targeted, device, n_classes=4):
         x, y = x.to(device), y.to(device)
         if targeted:
             # Generate random target labels
-            t = (y + torch.randint(1, n_classes, (len(y),)) % n_classes) % n_classes
+            t = torch.remainder(y + torch.randint_like(y, 0, high=n_classes), n_classes)
             x_adv = attack.execute(x, t, targeted)
+            y_all.append(t)
         else:
             # runs untargeted attacks
             x_adv = attack.execute(x, y, targeted)
+            y_all.append(y)
         x_adv_all.append(x_adv)
-        y_all.append(y)
     x_adv = torch.cat(x_adv_all)
     y = torch.cat(y_all)
     return x_adv, y
@@ -95,21 +96,21 @@ def run_blackbox_attack(attack, data_loader, targeted, device, n_classes=4):
        case of targeted attacks.
     3- The number of queries made to create each adversarial example.
     """
+    num_queries_all = []
     x_adv_all = []
     y_all = []
-    num_queries_all = []
-
     for i, (x, y) in enumerate(data_loader):
         x, y = x.to(device), y.to(device)
         if targeted:
             # Generate random target labels
-            t = (y + torch.randint(1, n_classes, (len(y),)) % n_classes) % n_classes
+            t = torch.remainder(y + torch.randint_like(y, 0, high=n_classes), n_classes)
             x_adv, num_queries = attack.execute(x, t, targeted)
+            y_all.append(t)
         else:
             # runs untargeted attacks
             x_adv, num_queries = attack.execute(x, y, targeted)
+            y_all.append(y)
         x_adv_all.append(x_adv)
-        y_all.append(y)
         num_queries_all.append(num_queries)
     x_adv = torch.cat(x_adv_all)
     y = torch.cat(y_all)

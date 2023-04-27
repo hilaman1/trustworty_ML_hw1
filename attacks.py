@@ -16,7 +16,7 @@ class PGDAttack:
         - alpha: step size at each iteration
         - rand_init: a flag denoting whether to randomly initialize
               adversarial samples in the range [x-eps, x+eps]
-        - early_stop: a flag denoting whether to stop perturbing a 
+        - early_stop: a flag denoting whether to stop perturbing a
               sample once the attack goal is met. If the goal is met
               for all samples in the batch, then the attack returns
               early, before completing all the iterations.
@@ -29,23 +29,26 @@ class PGDAttack:
         self.early_stop = early_stop
         self.loss_func = nn.CrossEntropyLoss(reduction='none')
 
+
     def execute(self, x, y, targeted=False):
         """
-        Executes the attack on a batch of samples x. y contains the true labels 
-        in case of untargeted attacks, and the target labels in case of targeted 
+        Executes the attack on a batch of samples x. y contains the true labels
+        in case of untargeted attacks, and the target labels in case of targeted
         attacks. The method returns the adversarially perturbed samples, which
-        lie in the ranges [0, 1] and [x-eps, x+eps]. The attack optionally 
-        performs random initialization and early stopping, depending on the 
+        lie in the ranges [0, 1] and [x-eps, x+eps]. The attack optionally
+        performs random initialization and early stopping, depending on the
         self.rand_init and self.early_stop flags.
         """
         # pick an initial point
         self.model.eval()
         self.model.requires_grad_(False)
+        x_orig = x.clone().detach()
+        x_adv = x.clone().detach()
+        y = y.clone().detach()
         if self.rand_init:
             # create [x-eps, x+eps]
-            delta = torch.zeros_like(x).uniform_(-self.eps, self.eps)
-            x_adv = torch.clamp(x + delta, 0, 1)
-
+            delta = torch.zeros_like(x_orig).uniform_(-self.eps, self.eps)
+            x_adv = torch.clamp(x + delta, 0, 1).detach()
         # loop until stopping condition is met:
 
         for i in range(self.n):
@@ -56,16 +59,20 @@ class PGDAttack:
             grad = torch.sign(torch.autograd.grad(loss.mean(), x_adv, retain_graph=False, create_graph=False)[0])
 
             if self.early_stop:
-                max_class = batch_predictions.max(1)
-                target_reached_flag = max_class.indices == y if targeted else max_class.indices != y
-                grad = (1 - target_reached_flag.int()).reshape(-1, 1, 1, 1) * grad
-                if torch.all(target_reached_flag):
-                    return x_adv
-            x_adv = x_adv + grad_sign * self.alpha * grad
+                # stops if all examples are miss classified
+                if targeted:
+                    misclassified = batch_predictions.max(1)[1] == y
+                    if misclassified.sum().item() == 0:
+                        return x_adv
+                else:
+                    misclassified = batch_predictions.max(1)[1] != y
+                    if misclassified.sum().item() == 0:
+                        return x_adv
+            x_adv = x_adv.detach() + grad_sign * self.alpha * grad
             # assert [x-eps, x+eps]
-            x_adv = torch.clamp(x_adv, x-self.eps, x+self.eps)
+            x_adv = torch.clamp(x_adv, x_orig - self.eps, x_orig + self.eps)
             # projection = min{max{0,x},1}
-            x_adv = torch.clamp(x_adv, 0, 1)
+            x_adv = torch.clamp(x_adv, 0, 1).detach_()
         return x_adv
 
 
@@ -73,8 +80,8 @@ class PGDAttack:
 
 class NESBBoxPGDAttack:
     """
-    Query-based black-box L_inf PGD attack using the cross-entropy loss, 
-    where gradients are estimated using Natural Evolutionary Strategies 
+    Query-based black-box L_inf PGD attack using the cross-entropy loss,
+    where gradients are estimated using Natural Evolutionary Strategies
     (NES).
     """
     def __init__(self, model, eps=8/255., n=50, alpha=1/255., momentum=0.,
@@ -87,12 +94,12 @@ class NESBBoxPGDAttack:
         - alpha: PGD's step size at each iteration
         - momentum: a value in [0., 1.) controlling the "weight" of
              historical gradients estimating gradients at each iteration
-        - k: the model is queries 2*k times at each iteration via 
+        - k: the model is queries 2*k times at each iteration via
               antithetic sampling to approximate the gradients
         - sigma: the std of the Gaussian noise used for querying
         - rand_init: a flag denoting whether to randomly initialize
               adversarial samples in the range [x-eps, x+eps]
-        - early_stop: a flag denoting whether to stop perturbing a 
+        - early_stop: a flag denoting whether to stop perturbing a
               sample once the attack goal is met. If the goal is met
               for all samples in the batch, then the attack returns
               early, before completing all the iterations.
@@ -110,10 +117,10 @@ class NESBBoxPGDAttack:
 
     def execute(self, x, y, targeted=False):
         """
-        Executes the attack on a batch of samples x. y contains the true labels 
-        in case of untargeted attacks, and the target labels in case of targeted 
+        Executes the attack on a batch of samples x. y contains the true labels
+        in case of untargeted attacks, and the target labels in case of targeted
         attacks. The method returns:
-        1- The adversarially perturbed samples, which lie in the ranges [0, 1] 
+        1- The adversarially perturbed samples, which lie in the ranges [0, 1]
             and [x-eps, x+eps].
         2- A vector with dimensionality len(x) containing the number of queries for
             each sample in x.
@@ -121,15 +128,15 @@ class NESBBoxPGDAttack:
         num_queries = torch.zeros(x.shape[0])
 
         # pick an initial point
+        x_adv = x.clone()
         if self.rand_init:
             # create [x-eps, x+eps]
             delta = torch.zeros_like(x).uniform_(-self.eps, self.eps)
-            delta = torch.clamp(x + delta, 0, 1) - x
-        else:
-            delta = torch.zeros_like(x)
+            x_adv = torch.clamp(x + delta, 0, 1)
         # loop until stopping condition is met:
         for i in range(self.n):
-            batch_predictions = self.model(x + delta)
+            x_adv.requires_grad_()
+            batch_predictions = self.model(x_adv)
             # estimate the gradient
             noise_pos = torch.normal(0, 1, x.shape)
             theta_pos = x + self.sigma * noise_pos
@@ -144,32 +151,29 @@ class NESBBoxPGDAttack:
 
             all_theta = torch.cat([positive_theta_loss.T * noise_pos.T, negative_theta_loss.T * noise_neg.T], dim=0)
             approx_gradient = all_theta.mean() / self.sigma
-
-            delta = delta + self.alpha * torch.sign(approx_gradient)
-            # assert [x-eps, x+eps]
-            delta = torch.clamp(delta, -self.eps, self.eps)
-            # projection = min{max{0,x},1}
-            delta = torch.clamp(x + delta, 0, 1) - x
-
+            grad_sign = -1 if targeted else 1
             # Compute delta for the next update
-            delta = self.momentum * delta + (1 - self.momentum) * delta
+            x_adv = self.momentum * x_adv + (1 - self.momentum) * x_adv
             if self.early_stop:
                 # stops if all examples are miss classified
                 if targeted:
                     if (batch_predictions.max(1)[1] == y).sum().item() == 0:
-                        num_queries += 2 * self.k
                         break
                 else:
                     if (batch_predictions.max(1)[1] != y).sum().item() == 0:
-                        num_queries += 2 * self.k
                         break
             num_queries += 2 * self.k
-        return x + delta , num_queries
+            x_adv = x_adv + grad_sign * self.alpha * torch.sign(approx_gradient)
+            # assert [x-eps, x+eps]
+            x_adv = torch.clamp(x_adv, x - self.eps, x + self.eps)
+            # projection = min{max{0,x},1}
+            x_adv = torch.clamp(x_adv, 0, 1)
+        return x_adv , num_queries
 
 
 class PGDEnsembleAttack:
     """
-    White-box L_inf PGD attack against an ensemble of models using the 
+    White-box L_inf PGD attack against an ensemble of models using the
     cross-entropy loss
     """
     def __init__(self, models, eps=8/255., n=50, alpha=1/255.,
@@ -183,7 +187,7 @@ class PGDEnsembleAttack:
         - alpha: PGD's step size at each iteration
         - rand_init: a flag denoting whether to randomly initialize
               adversarial samples in the range [x-eps, x+eps]
-        - early_stop: a flag denoting whether to stop perturbing a 
+        - early_stop: a flag denoting whether to stop perturbing a
               sample once the attack goal is met. If the goal is met
               for all samples in the batch, then the attack returns
               early, before completing all the iterations.
@@ -198,8 +202,8 @@ class PGDEnsembleAttack:
 
     def execute(self, x, y, targeted=False):
         """
-        Executes the attack on a batch of samples x. y contains the true labels 
-        in case of untargeted attacks, and the target labels in case of targeted 
+        Executes the attack on a batch of samples x. y contains the true labels
+        in case of untargeted attacks, and the target labels in case of targeted
         attacks. The method returns the adversarially perturbed samples, which
         lie in the ranges [0, 1] and [x-eps, x+eps].
         """
