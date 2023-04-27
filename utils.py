@@ -95,7 +95,26 @@ def run_blackbox_attack(attack, data_loader, targeted, device, n_classes=4):
        case of targeted attacks.
     3- The number of queries made to create each adversarial example.
     """
-    pass # FILL ME
+    x_adv_all = []
+    y_all = []
+    num_queries_all = []
+
+    for i, (x, y) in enumerate(data_loader):
+        x, y = x.to(device), y.to(device)
+        if targeted:
+            # Generate random target labels
+            t = (y + torch.randint(1, n_classes, (len(y),)) % n_classes) % n_classes
+            x_adv, num_queries = attack.execute(x, t, targeted)
+        else:
+            # runs untargeted attacks
+            x_adv, num_queries = attack.execute(x, y, targeted)
+        x_adv_all.append(x_adv)
+        y_all.append(y)
+        num_queries_all.append(num_queries)
+    x_adv = torch.cat(x_adv_all)
+    y = torch.cat(y_all)
+    queries = torch.cat(num_queries_all)
+    return x_adv, y, queries
 
 def compute_attack_success(model, x_adv, y, batch_size, targeted, device):
     """
@@ -104,6 +123,7 @@ def compute_attack_success(model, x_adv, y, batch_size, targeted, device):
     and the target labels in case of targeted attacks.
     """
     total_accuracy = 0.0
+    batch_num = 0
     for i in range(0, len(x_adv), batch_size):
         # Get batch of samples
         x_batch = x_adv[i:i + batch_size].to(device)
@@ -112,9 +132,15 @@ def compute_attack_success(model, x_adv, y, batch_size, targeted, device):
         batch_predictions = model(x_batch)
         # calculate accuracy
         predicted_labels = batch_predictions.argmax(dim=1, keepdim=True).squeeze()
-        accuracy = torch.sum(predicted_labels == y_batch).item() / x_batch.size(0)
+        if targeted:
+            # Targeted attack
+            accuracy = (predicted_labels == y_batch).float().mean().item()
+        else:
+            # Untargeted attack
+            accuracy = (predicted_labels != y_batch).float().mean().item()
         total_accuracy += accuracy
-    return 1 - total_accuracy / batch_size
+        batch_num += 1
+    return total_accuracy / batch_num
 
 
 def binary(num):

@@ -39,56 +39,35 @@ class PGDAttack:
         self.rand_init and self.early_stop flags.
         """
         # pick an initial point
+        self.model.eval()
+        self.model.requires_grad_(False)
         if self.rand_init:
             # create [x-eps, x+eps]
             delta = torch.zeros_like(x).uniform_(-self.eps, self.eps)
-        else:
-            delta = torch.zeros_like(x) - x
-        # loop until stopping condition is met:
-        x.requires_grad_()
-        for i in range(self.n):
-            batch_predictions = self.model(x + delta)
-            loss = self.loss_func(batch_predictions, y)
-            grad = torch.sign(torch.autograd.grad(loss.sum(), x, retain_graph=True)[0])
-            delta = delta + self.alpha * grad
-            # assert [x-eps, x+eps]
-            delta = torch.clamp(delta, -self.eps, self.eps)
-            # projection = min{max{0,x},1}
-            delta = torch.clamp(x + delta, 0, 1) - x
-            if self.early_stop:
-                # stops if all examples are miss classified
-                adversary = x + delta
-                if targeted:
-                    if (batch_predictions.max(1)[1] == y).sum().item() == 0:
-                        return adversary
-                else:
-                    if (batch_predictions.max(1)[1] != y).sum().item() == 0:
-                        return adversary
-        return x + delta
+            x_adv = torch.clamp(x + delta, 0, 1)
 
-        # # pick an initial point
-        # if self.rand_init:
-        #     # create [x-eps, x+eps]
-        #     delta = x + torch.zeros_like(x).uniform_(-self.eps, self.eps)
-        # else:
-        #     delta = x
-        # # loop until stopping condition is met:
-        # for i in range(self.n):
-        #     delta.requires_grad = True
-        #     self.model.zero_grad()
-        #     batch_predictions = self.model(delta)
-        #     loss = self.loss_func(batch_predictions, y)
-        #     loss.backward()
-        #     x_adv = delta + self.alpha * delta.grad.sign()
-        #     # assert [x-eps, x+eps]
-        #     eta = torch.clamp(x_adv - x, min=-self.eps, max=self.eps)
-        #     # projection = min{max{0,x},1}
-        #     delta = torch.clamp(x + eta, min=0, max=1).detach_()
-        #     if self.early_stop:
-        #         adversary = x + delta
-        #         if torch.all(adversary >= 0) and torch.all(adversary <= 1):
-        #             return adversary
-        # return x + delta
+        # loop until stopping condition is met:
+
+        for i in range(self.n):
+            x_adv.requires_grad_()
+            batch_predictions = self.model(x_adv)
+            loss = self.loss_func(batch_predictions, y)
+            grad_sign = -1 if targeted else 1
+            grad = torch.sign(torch.autograd.grad(loss.mean(), x_adv, retain_graph=False, create_graph=False)[0])
+
+            if self.early_stop:
+                max_class = batch_predictions.max(1)
+                target_reached_flag = max_class.indices == y if targeted else max_class.indices != y
+                grad = (1 - target_reached_flag.int()).reshape(-1, 1, 1, 1) * grad
+                if torch.all(target_reached_flag):
+                    return x_adv
+            x_adv = x_adv + grad_sign * self.alpha * grad
+            # assert [x-eps, x+eps]
+            x_adv = torch.clamp(x_adv, x-self.eps, x+self.eps)
+            # projection = min{max{0,x},1}
+            x_adv = torch.clamp(x_adv, 0, 1)
+        return x_adv
+
 
 
 
@@ -139,7 +118,53 @@ class NESBBoxPGDAttack:
         2- A vector with dimensionality len(x) containing the number of queries for
             each sample in x.
         """
-        pass # FILL ME
+        num_queries = torch.zeros(x.shape[0])
+
+        # pick an initial point
+        if self.rand_init:
+            # create [x-eps, x+eps]
+            delta = torch.zeros_like(x).uniform_(-self.eps, self.eps)
+            delta = torch.clamp(x + delta, 0, 1) - x
+        else:
+            delta = torch.zeros_like(x)
+        # loop until stopping condition is met:
+        for i in range(self.n):
+            batch_predictions = self.model(x + delta)
+            # estimate the gradient
+            noise_pos = torch.normal(0, 1, x.shape)
+            theta_pos = x + self.sigma * noise_pos
+            # Query the model to compute gradients using antithetic sampling
+            positive_predictions = self.model(theta_pos)
+            positive_theta_loss = self.loss_func(positive_predictions, y)
+
+            noise_neg = (-1) * noise_pos
+            theta_neg = x + self.sigma * noise_neg
+            negative_predictions = self.model(theta_neg)
+            negative_theta_loss = self.loss_func(negative_predictions, y)
+
+            all_theta = torch.cat([positive_theta_loss.T * noise_pos.T, negative_theta_loss.T * noise_neg.T], dim=0)
+            approx_gradient = all_theta.mean() / self.sigma
+
+            delta = delta + self.alpha * torch.sign(approx_gradient)
+            # assert [x-eps, x+eps]
+            delta = torch.clamp(delta, -self.eps, self.eps)
+            # projection = min{max{0,x},1}
+            delta = torch.clamp(x + delta, 0, 1) - x
+
+            # Compute delta for the next update
+            delta = self.momentum * delta + (1 - self.momentum) * delta
+            if self.early_stop:
+                # stops if all examples are miss classified
+                if targeted:
+                    if (batch_predictions.max(1)[1] == y).sum().item() == 0:
+                        num_queries += 2 * self.k
+                        break
+                else:
+                    if (batch_predictions.max(1)[1] != y).sum().item() == 0:
+                        num_queries += 2 * self.k
+                        break
+            num_queries += 2 * self.k
+        return x + delta , num_queries
 
 
 class PGDEnsembleAttack:
