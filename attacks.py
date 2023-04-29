@@ -131,7 +131,7 @@ class NESBBoxPGDAttack:
             each sample in x.
         """
         device = next(self.model.parameters()).device
-        num_queries = torch.zeros(x.shape[0])
+        num_queries = torch.zeros(x.shape[0]).detach().to(device)
         self.model.eval()
         self.model.requires_grad_(False)
         x_orig = x.clone()
@@ -148,31 +148,7 @@ class NESBBoxPGDAttack:
         for i in range(self.n):
             x_adv.requires_grad = False
             batch_predictions = self.model(x_adv)
-            # estimate the gradient using NES
-            grad = 0
-            N = x.shape[1] * x.shape[2] * x.shape[3]
-            noise = torch.randn(self.k, x.shape[0], N)
-            deltas = noise.view(self.k, x.shape[0], x.shape[1], x.shape[2], x.shape[3]).detach().to(device)
-
-            thetas = x.unsqueeze(0) + (self.sigma * deltas)
-            outputs = self.model(thetas.view(-1, x.shape[1], x.shape[2], x.shape[3]))
-            outputs = outputs.view(self.k, x.shape[0], -1)
-            loss = torch.zeros((self.k, x.shape[0])).detach().to(device)
-            for i in range(self.k):
-                loss[i] = self.loss_func(outputs[i], y)
-            loss = loss.view(self.k, x.shape[0], 1, 1, 1)
-            grad += (loss * deltas).mean(dim=0)
-
-            thetas = x.unsqueeze(0) - (self.sigma * deltas)
-            outputs = self.model(thetas.view(-1, x.shape[1], x.shape[2], x.shape[3]))
-            outputs = outputs.view(self.k, x.shape[0], -1)
-            loss = torch.zeros((self.k, x.shape[0])).detach().to(device)
-            for i in range(self.k):
-                loss[i] = self.loss_func(outputs[i], y)
-            loss = loss.view(self.k, x.shape[0], 1, 1, 1)
-            grad -= (loss * deltas).mean(dim=0)
-            estimated_grad = grad / (2 * self.sigma)
-
+            estimated_grad = self.estimate_gradient(device, x_adv, y)
             grad_sign = -1 if targeted else 1
             # Compute delta for the next update
             estimated_grad = prev_grad * self.momentum + (1 - self.momentum) * estimated_grad
@@ -180,24 +156,55 @@ class NESBBoxPGDAttack:
             if self.early_stop:
                 # stops if all examples are miss classified
                 if targeted:
-                    misclassified = batch_predictions.max(1)[1] == y
+                    misclassified = (batch_predictions.max(1)[1] == y).detach().to(device)
+                    # stop updating miss classified examples
                     estimated_grad = (1 - misclassified.int()).reshape(-1, 1, 1, 1) * estimated_grad
+                    # update number of queries
+                    num_queries += ((1 - misclassified.int()) * (2 * self.k))
 
                     if misclassified.sum().item() == 0:
-                        num_queries += (misclassified * (2 * self.k))
-                        break
+                        return x_adv, num_queries
                 else:
-                    misclassified = batch_predictions.max(1)[1] != y
+                    misclassified = (batch_predictions.max(1)[1] != y).detach().to(device)
                     estimated_grad = (1 - misclassified.int()).reshape(-1, 1, 1, 1) * estimated_grad
+                    # update number of queries
+                    num_queries += ((1 - misclassified.int()) * (2 * self.k))
                     if misclassified.sum().item() == 0:
-                        num_queries += (misclassified * (2 * self.k))
-                        break
+                        return x_adv, num_queries
+            else:
+                num_queries += 2 * self.k
+
             x_adv = x_adv + grad_sign * self.alpha * torch.sign(estimated_grad)
             # assert [x-eps, x+eps]
             x_adv = torch.clamp(x_adv, x - self.eps, x + self.eps)
             # projection = min{max{0,x},1}
             x_adv = torch.clamp(x_adv, 0, 1)
         return x_adv , num_queries
+
+    def estimate_gradient(self, device, x, y):
+        # estimate the gradient using NES
+        grad = 0
+        N = x.shape[1] * x.shape[2] * x.shape[3]
+        noise = torch.randn(self.k, x.shape[0], N)
+        deltas = noise.view(self.k, x.shape[0], x.shape[1], x.shape[2], x.shape[3]).detach().to(device)
+        thetas = x.unsqueeze(0) + (self.sigma * deltas)
+        outputs = self.model(thetas.view(-1, x.shape[1], x.shape[2], x.shape[3]))
+        outputs = outputs.view(self.k, x.shape[0], -1)
+        loss = torch.zeros((self.k, x.shape[0])).detach().to(device)
+        for i in range(self.k):
+            loss[i] = self.loss_func(outputs[i], y)
+        loss = loss.view(self.k, x.shape[0], 1, 1, 1)
+        grad += (loss * deltas).mean(dim=0)
+        thetas = x.unsqueeze(0) - (self.sigma * deltas)
+        outputs = self.model(thetas.view(-1, x.shape[1], x.shape[2], x.shape[3]))
+        outputs = outputs.view(self.k, x.shape[0], -1)
+        loss = torch.zeros((self.k, x.shape[0])).detach().to(device)
+        for i in range(self.k):
+            loss[i] = self.loss_func(outputs[i], y)
+        loss = loss.view(self.k, x.shape[0], 1, 1, 1)
+        grad -= (loss * deltas).mean(dim=0)
+        estimated_grad = grad / (2 * self.sigma)
+        return estimated_grad
 
 
 class PGDEnsembleAttack:

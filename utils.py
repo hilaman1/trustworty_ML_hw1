@@ -105,13 +105,15 @@ def run_blackbox_attack(attack, data_loader, targeted, device, n_classes=4):
             # Generate random target labels
             t = torch.remainder(y + torch.randint_like(y, 0, high=n_classes), n_classes)
             x_adv, num_queries = attack.execute(x, t, targeted)
+            x_adv_all.append(x_adv)
+            num_queries_all.append(num_queries)
             y_all.append(t)
         else:
             # runs untargeted attacks
             x_adv, num_queries = attack.execute(x, y, targeted)
+            x_adv_all.append(x_adv)
+            num_queries_all.append(num_queries)
             y_all.append(y)
-        x_adv_all.append(x_adv)
-        num_queries_all.append(num_queries)
     x_adv = torch.cat(x_adv_all)
     y = torch.cat(y_all)
     queries = torch.cat(num_queries_all)
