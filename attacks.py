@@ -59,13 +59,18 @@ class PGDAttack:
             grad = torch.sign(torch.autograd.grad(loss.mean(), x_adv, retain_graph=False, create_graph=False)[0])
 
             if self.early_stop:
+
                 # stops if all examples are miss classified
                 if targeted:
                     misclassified = batch_predictions.max(1)[1] == y
+                    grad = (1 - misclassified.int()).reshape(-1, 1, 1, 1) * grad
+
                     if misclassified.sum().item() == 0:
                         return x_adv
                 else:
                     misclassified = batch_predictions.max(1)[1] != y
+                    grad = (1 - misclassified.int()).reshape(-1, 1, 1, 1) * grad
+
                     if misclassified.sum().item() == 0:
                         return x_adv
             x_adv = x_adv.detach() + grad_sign * self.alpha * grad
@@ -125,12 +130,13 @@ class NESBBoxPGDAttack:
         2- A vector with dimensionality len(x) containing the number of queries for
             each sample in x.
         """
+        device = next(self.model.parameters()).device
         num_queries = torch.zeros(x.shape[0])
         self.model.eval()
         self.model.requires_grad_(False)
-        x_orig = x.clone().detach()
-        x_adv = x.clone().detach()
-        y = y.clone().detach()
+        x_orig = x.clone()
+        x_adv = x.clone()
+        y = y.clone()
         prev_grad = 0
 
         # pick an initial point
@@ -140,17 +146,18 @@ class NESBBoxPGDAttack:
             x_adv = torch.clamp(x + delta, 0, 1).detach()
         # loop until stopping condition is met:
         for i in range(self.n):
-            x_adv.requires_grad_()
+            x_adv.requires_grad = False
             batch_predictions = self.model(x_adv)
             # estimate the gradient using NES
             grad = 0
             N = x.shape[1] * x.shape[2] * x.shape[3]
             noise = torch.randn(self.k, x.shape[0], N)
-            deltas = noise.view(self.k, x.shape[0], x.shape[1], x.shape[2], x.shape[3])
+            deltas = noise.view(self.k, x.shape[0], x.shape[1], x.shape[2], x.shape[3]).detach().to(device)
+
             thetas = x.unsqueeze(0) + (self.sigma * deltas)
             outputs = self.model(thetas.view(-1, x.shape[1], x.shape[2], x.shape[3]))
             outputs = outputs.view(self.k, x.shape[0], -1)
-            loss = torch.zeros((self.k, x.shape[0]))
+            loss = torch.zeros((self.k, x.shape[0])).detach().to(device)
             for i in range(self.k):
                 loss[i] = self.loss_func(outputs[i], y)
             loss = loss.view(self.k, x.shape[0], 1, 1, 1)
@@ -159,25 +166,13 @@ class NESBBoxPGDAttack:
             thetas = x.unsqueeze(0) - (self.sigma * deltas)
             outputs = self.model(thetas.view(-1, x.shape[1], x.shape[2], x.shape[3]))
             outputs = outputs.view(self.k, x.shape[0], -1)
-            loss = torch.zeros((self.k, x.shape[0]))
+            loss = torch.zeros((self.k, x.shape[0])).detach().to(device)
             for i in range(self.k):
                 loss[i] = self.loss_func(outputs[i], y)
             loss = loss.view(self.k, x.shape[0], 1, 1, 1)
             grad -= (loss * deltas).mean(dim=0)
             estimated_grad = grad / (2 * self.sigma)
 
-            # for i in range(self.k):
-            #     # positive samples
-            #     thetas = x + (self.sigma * deltas[i])
-            #     outputs = self.model(thetas)
-            #     loss = self.loss_func(outputs, y)
-            #     grad += loss.reshape(-1, 1, 1, 1) * deltas[i]
-            #     # negative samples
-            #     thetas = x - (self.sigma * deltas[i])
-            #     outputs = self.model(thetas)
-            #     loss = self.loss_func(outputs, y)
-            #     grad -= loss.reshape(-1, 1, 1, 1) * deltas[i]
-            # estimated_grad = grad / (2 * self.sigma)
             grad_sign = -1 if targeted else 1
             # Compute delta for the next update
             estimated_grad = prev_grad * self.momentum + (1 - self.momentum) * estimated_grad
@@ -185,12 +180,18 @@ class NESBBoxPGDAttack:
             if self.early_stop:
                 # stops if all examples are miss classified
                 if targeted:
-                    if (batch_predictions.max(1)[1] == y).sum().item() == 0:
+                    misclassified = batch_predictions.max(1)[1] == y
+                    estimated_grad = (1 - misclassified.int()).reshape(-1, 1, 1, 1) * estimated_grad
+
+                    if misclassified.sum().item() == 0:
+                        num_queries += (misclassified * (2 * self.k))
                         break
                 else:
-                    if (batch_predictions.max(1)[1] != y).sum().item() == 0:
+                    misclassified = batch_predictions.max(1)[1] != y
+                    estimated_grad = (1 - misclassified.int()).reshape(-1, 1, 1, 1) * estimated_grad
+                    if misclassified.sum().item() == 0:
+                        num_queries += (misclassified * (2 * self.k))
                         break
-            num_queries += 2 * self.k
             x_adv = x_adv + grad_sign * self.alpha * torch.sign(estimated_grad)
             # assert [x-eps, x+eps]
             x_adv = torch.clamp(x_adv, x - self.eps, x + self.eps)
