@@ -126,34 +126,62 @@ class NESBBoxPGDAttack:
             each sample in x.
         """
         num_queries = torch.zeros(x.shape[0])
+        self.model.eval()
+        self.model.requires_grad_(False)
+        x_orig = x.clone().detach()
+        x_adv = x.clone().detach()
+        y = y.clone().detach()
+        prev_grad = 0
 
         # pick an initial point
-        x_adv = x.clone()
         if self.rand_init:
             # create [x-eps, x+eps]
-            delta = torch.zeros_like(x).uniform_(-self.eps, self.eps)
-            x_adv = torch.clamp(x + delta, 0, 1)
+            delta = torch.zeros_like(x_orig).uniform_(-self.eps, self.eps)
+            x_adv = torch.clamp(x + delta, 0, 1).detach()
         # loop until stopping condition is met:
         for i in range(self.n):
             x_adv.requires_grad_()
             batch_predictions = self.model(x_adv)
-            # estimate the gradient
-            noise_pos = torch.normal(0, 1, x.shape)
-            theta_pos = x + self.sigma * noise_pos
-            # Query the model to compute gradients using antithetic sampling
-            positive_predictions = self.model(theta_pos)
-            positive_theta_loss = self.loss_func(positive_predictions, y)
+            # estimate the gradient using NES
+            grad = 0
+            N = x.shape[1] * x.shape[2] * x.shape[3]
+            noise = torch.randn(self.k, x.shape[0], N)
+            deltas = noise.view(self.k, x.shape[0], x.shape[1], x.shape[2], x.shape[3])
+            thetas = x.unsqueeze(0) + (self.sigma * deltas)
+            outputs = self.model(thetas.view(-1, x.shape[1], x.shape[2], x.shape[3]))
+            outputs = outputs.view(self.k, x.shape[0], -1)
+            loss = torch.zeros((self.k, x.shape[0]))
+            for i in range(self.k):
+                loss[i] = self.loss_func(outputs[i], y)
+            loss = loss.view(self.k, x.shape[0], 1, 1, 1)
+            grad += (loss * deltas).mean(dim=0)
 
-            noise_neg = (-1) * noise_pos
-            theta_neg = x + self.sigma * noise_neg
-            negative_predictions = self.model(theta_neg)
-            negative_theta_loss = self.loss_func(negative_predictions, y)
+            thetas = x.unsqueeze(0) - (self.sigma * deltas)
+            outputs = self.model(thetas.view(-1, x.shape[1], x.shape[2], x.shape[3]))
+            outputs = outputs.view(self.k, x.shape[0], -1)
+            loss = torch.zeros((self.k, x.shape[0]))
+            for i in range(self.k):
+                loss[i] = self.loss_func(outputs[i], y)
+            loss = loss.view(self.k, x.shape[0], 1, 1, 1)
+            grad -= (loss * deltas).mean(dim=0)
+            estimated_grad = grad / (2 * self.sigma)
 
-            all_theta = torch.cat([positive_theta_loss.T * noise_pos.T, negative_theta_loss.T * noise_neg.T], dim=0)
-            approx_gradient = all_theta.mean() / self.sigma
+            # for i in range(self.k):
+            #     # positive samples
+            #     thetas = x + (self.sigma * deltas[i])
+            #     outputs = self.model(thetas)
+            #     loss = self.loss_func(outputs, y)
+            #     grad += loss.reshape(-1, 1, 1, 1) * deltas[i]
+            #     # negative samples
+            #     thetas = x - (self.sigma * deltas[i])
+            #     outputs = self.model(thetas)
+            #     loss = self.loss_func(outputs, y)
+            #     grad -= loss.reshape(-1, 1, 1, 1) * deltas[i]
+            # estimated_grad = grad / (2 * self.sigma)
             grad_sign = -1 if targeted else 1
             # Compute delta for the next update
-            x_adv = self.momentum * x_adv + (1 - self.momentum) * x_adv
+            estimated_grad = prev_grad * self.momentum + (1 - self.momentum) * estimated_grad
+            prev_grad = estimated_grad
             if self.early_stop:
                 # stops if all examples are miss classified
                 if targeted:
@@ -163,7 +191,7 @@ class NESBBoxPGDAttack:
                     if (batch_predictions.max(1)[1] != y).sum().item() == 0:
                         break
             num_queries += 2 * self.k
-            x_adv = x_adv + grad_sign * self.alpha * torch.sign(approx_gradient)
+            x_adv = x_adv + grad_sign * self.alpha * torch.sign(estimated_grad)
             # assert [x-eps, x+eps]
             x_adv = torch.clamp(x_adv, x - self.eps, x + self.eps)
             # projection = min{max{0,x},1}
